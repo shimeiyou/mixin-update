@@ -5,7 +5,7 @@
 ## 安装
 
 ```bash
-curl -fsSLo ~/.local/bin/mixin-update https://raw.githubusercontent.com/<OWNER>/mixin-update/main/mixin-update
+curl -fsSLo ~/.local/bin/mixin-update https://raw.githubusercontent.com/shimeiyou/mixin-update/main/mixin-update
 chmod +x ~/.local/bin/mixin-update
 ```
 
