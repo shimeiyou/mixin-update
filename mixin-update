@@ -1,94 +1,147 @@
 #!/usr/bin/env bash
-# Mixin 桌面版更新脚本：查 GitHub 最新 x86_64 AppImage，有新版就下载替换并更新启动项
-# 用法：mixin-update [--check] [--force] [--delete-old] [-h|--help|help]
+# mixin-update：Mixin Messenger 桌面版 安装 / 更新 / 检查（Linux + macOS）
+# Windows 请用 install.ps1
 set -euo pipefail
+REPO="MixinNetwork/flutter-app"
+API="https://api.github.com/repos/$REPO/releases"
 APPDIR="$HOME/Applications"
 DESKTOP="$HOME/.local/share/applications/mixin-desktop.desktop"
+ICON="$HOME/.local/share/icons/mixin-desktop.png"
 FONTCONF="$HOME/.config/mixin-fonts/fonts.conf"
-ASSET="mixin_desktop_linux_amd64.AppImage"
-API="https://api.github.com/repos/MixinNetwork/flutter-app/releases/latest"
+
 usage(){ cat <<'HLP'
-mixin-update — Mixin 桌面版（Linux x86_64 AppImage）检查与更新
+mixin-update — Mixin Messenger 桌面版 安装 / 更新 / 检查（Linux、macOS；Windows 用 install.ps1）
 
 用法:
-  mixin-update                检查更新；有新版则下载并替换安装
-  mixin-update --check        只检查，不下载
-  mixin-update --delete-old   更新后删除旧版 AppImage（默认保留上一版用于回滚）
-  mixin-update --force        即使已是最新也重新下载安装
-  mixin-update -h | --help | help   显示本帮助
+  mixin-update                    = update（兼容旧用法）
+  mixin-update recommend          检测系统/架构，给出推荐安装方式
+  mixin-update install [--font 字体名]   按推荐方式安装（已装则等同 update）
+  mixin-update update             有新版则下载替换
+  mixin-update check              只检查，不下载
+  mixin-update help | -h | --help 显示本帮助
+选项:
+  --delete-old   (Linux) 更新后删除旧版 AppImage，默认保留上一版回滚
+  --force        即使已是最新也重新安装
+  --font NAME    (Linux) 只对 Mixin 生效的字体，例如 "HarmonyOS Sans SC"
+  旧写法 --check 等同 check
 
-更新时会:
-  1. 从启动项 ~/.local/share/applications/mixin-desktop.desktop 读取当前版本
-  2. 查 GitHub Releases 最新 mixin_desktop_linux_amd64.AppImage
-  3. 下载到 ~/Applications/mixin-<版本>-x86_64.AppImage（先存 .part）
-  4. 校验大小 + sha256，通过才 chmod +x 并改名；失败则原版本不动
-  5. 备份启动项为 mixin-desktop.desktop.bak-update，只替换其中的 AppImage 路径
+平台:
+  Linux x86_64/arm64  官方 AppImage → ~/Applications，生成启动项，无需 sudo
+  macOS               官方 .dmg（若最新版未附 dmg，则取最近带 dmg 的版本并提示 App Store）
+  其他                提示不支持并给出官方 Releases 链接
 
-字体:
-  启动项中的 env FONTCONFIG_FILE=~/.config/mixin-fonts/fonts.conf 原样保留
-  （Mixin 专用 HarmonyOS Sans SC 字体配置）
-
-回滚:
-  mv ~/.local/share/applications/mixin-desktop.desktop.bak-update \
-     ~/.local/share/applications/mixin-desktop.desktop
-  然后重开 Mixin（需未使用 --delete-old，旧 AppImage 仍在）
-
-不需要 sudo。Mixin 运行中时，更新后关掉再从菜单重开即生效。
+字体（Linux）: 启动项里的 env FONTCONFIG_FILE=~/.config/mixin-fonts/fonts.conf 更新时原样保留
+回滚（Linux）: mv ~/.local/share/applications/mixin-desktop.desktop.bak-update \
+                  ~/.local/share/applications/mixin-desktop.desktop
+回滚（macOS）: 更新前旧 App 备份为 Mixin.app.bak-update，删新版后改回名字即可
 HLP
 }
-CHECK=0; FORCE=0; DELOLD=0
-for a in "$@"; do case "$a" in
-  --check) CHECK=1;; --force) FORCE=1;; --delete-old) DELOLD=1;;
-  -h|--help|help) usage; exit 0;; *) echo "未知参数: $a（mixin-update --help 查看用法）" >&2; exit 2;; esac; done
 die(){ echo "❌ $*" >&2; exit 1; }
-for c in curl python3 sha256sum; do command -v $c >/dev/null || die "缺少 $c"; done
+need(){ for c in "$@"; do command -v "$c" >/dev/null || die "缺少命令: $c"; done; }
+vgt(){ python3 -c 'import sys,re;v=lambda s:[int(x) for x in re.findall(r"\d+",s)];print(int(v(sys.argv[1])>v(sys.argv[2])))' "$1" "$2"; }
 
-# 当前版本：从 .desktop 的 Exec 里取 AppImage 路径
-CUR=$(grep -oP '(?<=\s|=)\S*mixin-[0-9.]+-x86_64\.AppImage' "$DESKTOP" | head -1 || true)
-CURVER=$(basename "${CUR:-mixin-0-x86_64.AppImage}" | sed -E 's/mixin-([0-9.]+)-x86_64\.AppImage/\1/')
-echo "当前版本: ${CURVER} (${CUR:-未找到})"
+CMD=update; FORCE=0; DELOLD=0; FONT=""
+while [ $# -gt 0 ]; do case "$1" in
+  install|update|check|recommend) CMD=$1;;
+  help|-h|--help) usage; exit 0;;
+  --check) CMD=check;; --force) FORCE=1;; --delete-old) DELOLD=1;;
+  --font) shift; FONT=${1:-};;
+  *) die "未知参数: $1（mixin-update --help 查看用法）";; esac; shift; done
+need curl python3
 
-# 最新版本信息
-INFO=$(curl -fsSL -H 'Accept: application/vnd.github+json' "$API") || die "无法访问 GitHub API（网络/限流），稍后再试"
-read -r TAG URL SIZE DIGEST < <(python3 -c '
-import sys,json;d=json.loads(sys.stdin.read());a=[x for x in d["assets"] if x["name"]==sys.argv[1]]
-if not a: sys.exit("no asset")
-a=a[0];print(d["tag_name"],a["browser_download_url"],a["size"],(a.get("digest") or "none").replace("sha256:",""))' "$ASSET" <<<"$INFO") || die "最新 release 里找不到 $ASSET"
-NEWVER=${TAG#v}
-echo "最新版本: ${NEWVER}"
+OS=$(uname -s); ARCH=$(uname -m)
+case "$ARCH" in x86_64|amd64) A=amd64; LA=x86_64;; aarch64|arm64) A=arm64; LA=arm64;; *) A=""; LA="";; esac
 
-newer=$(python3 -c 'import sys;v=lambda s:[int(x) for x in s.split(".") if x.isdigit()];print(int(v(sys.argv[1])>v(sys.argv[2])))' "$NEWVER" "$CURVER")
-if [ "$newer" != 1 ] && [ $FORCE = 0 ]; then echo "✅ 已是最新"; exit 0; fi
-[ $CHECK = 1 ] && { echo "⬆️  有更新：$CURVER → $NEWVER（去掉 --check 运行即可安装）"; exit 0; }
+# 从 releases 中找资产：$1=正则；输出 "tag url size sha256|none"
+find_asset(){ curl -fsSL -H 'Accept: application/vnd.github+json' "$API?per_page=30" | python3 -c '
+import sys,json,re
+for d in json.load(sys.stdin):
+  if d.get("draft") or d.get("prerelease"): continue
+  for a in d["assets"]:
+    if re.fullmatch(sys.argv[1],a["name"]):
+      print(d["tag_name"],a["browser_download_url"],a["size"],(a.get("digest") or "none").replace("sha256:",""));sys.exit()
+sys.exit(1)' "$1" || die "在官方 Releases 找不到匹配 $1 的安装包（或无法访问 GitHub）"; }
 
-DEST="$APPDIR/mixin-${NEWVER}-x86_64.AppImage"; TMP="$DEST.part"
-mkdir -p "$APPDIR"; trap 'rm -f "$TMP"' EXIT
-echo "下载 $URL"
-curl -fL --retry 3 -o "$TMP" "$URL" || die "下载失败，原版本未改动"
-GOT=$(stat -c %s "$TMP"); [ "$GOT" = "$SIZE" ] || die "大小不符 ($GOT != $SIZE)，原版本未改动"
-if [ "$DIGEST" != none ]; then
-  echo "$DIGEST  $TMP" | sha256sum -c --quiet - || die "sha256 校验失败，原版本未改动"; echo "sha256 校验通过"
-else echo "⚠️ 官方未提供 sha256，仅校验了大小"; fi
-chmod +x "$TMP"; mv -f "$TMP" "$DEST"; trap - EXIT
+download(){ # $1 url $2 dest $3 size $4 sha
+  curl -fL --retry 3 -o "$2.part" "$1" || { rm -f "$2.part"; die "下载失败，原版本未改动"; }
+  [ "$(wc -c <"$2.part" | tr -d ' ')" = "$3" ] || { rm -f "$2.part"; die "大小不符，原版本未改动"; }
+  if [ "$4" != none ]; then
+    s=$( (command -v sha256sum >/dev/null && sha256sum "$2.part") || shasum -a 256 "$2.part"); s=${s%% *}
+    [ "$s" = "$4" ] || { rm -f "$2.part"; die "sha256 校验失败，原版本未改动"; }; echo "sha256 校验通过"
+  else echo "⚠️ 官方未提供 sha256，仅校验了大小"; fi
+  mv -f "$2.part" "$2"; }
 
-# 更新启动项：只替换 AppImage 路径，保留 FONTCONFIG_FILE 等其余部分
-cp -a "$DESKTOP" "$DESKTOP.bak-update"
-if grep -q 'mixin-[0-9.]*-x86_64\.AppImage' "$DESKTOP"; then
-  sed -i -E "s#\S*mixin-[0-9.]+-x86_64\.AppImage#$DEST#" "$DESKTOP"
-else
-  sed -i -E "s#^Exec=.*#Exec=env FONTCONFIG_FILE=$FONTCONF $DEST %U#" "$DESKTOP"
-fi
-grep -q "FONTCONFIG_FILE=$FONTCONF" "$DESKTOP" || echo "⚠️ 启动项里没有 FONTCONFIG_FILE，请检查 $DESKTOP"
-echo "启动项: $(grep ^Exec= "$DESKTOP")"
+recommend(){
+  echo "系统: $OS / $ARCH"
+  case "$OS" in
+    Linux) [ -n "$A" ] || { echo "不支持的架构 $ARCH"; return 1; }
+      echo "推荐: 官方 AppImage（mixin_desktop_linux_${A}.AppImage）装到 ~/Applications，免 sudo，可用本工具自动更新"
+      echo "其他官方包: .deb（Debian/Ubuntu，需 sudo）、.snap、_portable.tar.gz；Arch 无 AUR 包";;
+    Darwin) echo "推荐: 官方 .dmg 装到 /Applications（或 Mac App Store: https://apps.apple.com/app/id1571128582）";;
+    *) echo "此脚本不支持 $OS；Windows 请运行 install.ps1，其余见 https://github.com/$REPO/releases"; return 1;;
+  esac; }
 
-if [ -n "${CUR:-}" ] && [ -f "$CUR" ] && [ "$CUR" != "$DEST" ]; then
-  if [ $DELOLD = 1 ]; then rm -f "$CUR"; echo "已删除旧版 $CUR"
+# ---------- Linux ----------
+lin_current(){ [ -f "$DESKTOP" ] && grep -oE '[^ =]*mixin-[0-9.]+-[a-z0-9_]+\.AppImage' "$DESKTOP" | head -1 || true; }
+lin_write_font(){ mkdir -p "$(dirname "$FONTCONF")"; cat > "$FONTCONF" <<X
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
+  <match target="pattern">
+    <test qual="any" name="family"><string>sans-serif</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>$FONT</string></edit>
+  </match>
+  <alias binding="strong"><family>emoji</family><prefer><family>Noto Color Emoji</family></prefer></alias>
+</fontconfig>
+X
+  command -v fc-list >/dev/null && ! fc-list | grep -qF "$FONT" && echo "⚠️ 系统里没找到字体 $FONT，请先安装"; echo "已写入 Mixin 专用字体配置: $FONTCONF"; }
+linux(){
+  [ -n "$A" ] || die "不支持的架构 $ARCH"
+  read -r TAG URL SIZE SHA < <(find_asset "mixin_desktop_linux_${A}\.AppImage")
+  NEW=${TAG#v}; CUR=$(lin_current); CURV=$(basename "${CUR:-mixin-0-x.AppImage}" | sed -E 's/mixin-([0-9.]+)-.*/\1/')
+  echo "当前: ${CURV} ${CUR:+($CUR)}  最新: $NEW"
+  [ -n "$FONT" ] && lin_write_font
+  if [ "$(vgt "$NEW" "$CURV")" != 1 ] && [ $FORCE = 0 ]; then echo "✅ 已是最新"; return; fi
+  [ $CMD = check ] && { echo "⬆️ 有更新/未安装：运行 mixin-update ${CUR:+update}${CUR:-install}"; return; }
+  mkdir -p "$APPDIR" "$(dirname "$DESKTOP")" "$(dirname "$ICON")"
+  DEST="$APPDIR/mixin-${NEW}-${LA}.AppImage"; download "$URL" "$DEST" "$SIZE" "$SHA"; chmod +x "$DEST"
+  if [ ! -f "$ICON" ]; then (t=$(mktemp -d); cd "$t" && "$DEST" --appimage-extract mixin_desktop.png >/dev/null 2>&1 && cp squashfs-root/mixin_desktop.png "$ICON"; rm -rf "$t") || true; fi
+  ENVP=""; [ -f "$FONTCONF" ] && ENVP="env FONTCONFIG_FILE=$FONTCONF "
+  if [ -f "$DESKTOP" ] && [ -n "$CUR" ]; then
+    cp -a "$DESKTOP" "$DESKTOP.bak-update"; sed -i -E "s#[^ =]*mixin-[0-9.]+-[a-z0-9_]+\.AppImage#$DEST#" "$DESKTOP"
+    if [ -n "$ENVP" ] && ! grep -q FONTCONFIG_FILE "$DESKTOP"; then sed -i -E "s#^Exec=#Exec=$ENVP#" "$DESKTOP"; fi
   else
-    # 默认只保留上一版一份作回滚用
-    for f in "$APPDIR"/mixin-*-x86_64.AppImage; do [ "$f" = "$DEST" ] || [ "$f" = "$CUR" ] || rm -f "$f"; done
-    echo "保留旧版用于回滚: $CUR"
+    [ -f "$DESKTOP" ] && cp -a "$DESKTOP" "$DESKTOP.bak-update"
+    printf '[Desktop Entry]\nName=Mixin Messenger\nExec=%s%s %%U\nIcon=%s\nType=Application\nCategories=Network;InstantMessaging;\nTerminal=false\nStartupWMClass=Mixin_desktop\n' "$ENVP" "$DEST" "$ICON" > "$DESKTOP"
   fi
-fi
-pgrep -f /mixin_desktop >/dev/null && echo "ℹ️ Mixin 正在运行，关掉后从菜单重开即用新版"
-echo "✅ 已更新到 $NEWVER"
-echo "回滚：mv \"$DESKTOP.bak-update\" \"$DESKTOP\"（旧 AppImage 仍在则立即生效）"
+  echo "启动项: $(grep ^Exec= "$DESKTOP")"
+  if [ -n "$CUR" ] && [ -f "$CUR" ] && [ "$CUR" != "$DEST" ]; then
+    if [ $DELOLD = 1 ]; then rm -f "$CUR"; echo "已删除旧版"; else
+      for f in "$APPDIR"/mixin-*.AppImage; do [ "$f" = "$DEST" ] || [ "$f" = "$CUR" ] || rm -f "$f"; done; echo "保留旧版用于回滚: $CUR"; fi
+  fi
+  pgrep -f /mixin_desktop >/dev/null && echo "ℹ️ Mixin 正在运行，关掉后从菜单重开即用新版"
+  echo "✅ 已安装 $NEW（菜单里搜 Mixin Messenger）"; }
+
+# ---------- macOS ----------
+mac(){
+  need hdiutil
+  read -r TAG URL SIZE SHA < <(find_asset 'mixin-[0-9.]+\.dmg')
+  LATEST=$(curl -fsSL "$API/latest" | python3 -c 'import sys,json;print(json.load(sys.stdin)["tag_name"])' || echo "$TAG")
+  NEW=${TAG#v}; [ "$TAG" = "$LATEST" ] || echo "ℹ️ 最新 $LATEST 未附 dmg，使用最近带 dmg 的 $TAG；更及时可用 Mac App Store: https://apps.apple.com/app/id1571128582"
+  APP=""; for p in /Applications/Mixin.app "$HOME/Applications/Mixin.app"; do [ -d "$p" ] && APP=$p && break; done
+  CURV=0; [ -n "$APP" ] && CURV=$(defaults read "$APP/Contents/Info" CFBundleShortVersionString 2>/dev/null || echo 0)
+  echo "当前: $CURV ${APP:+($APP)}  可装: $NEW"
+  if [ "$(vgt "$NEW" "$CURV")" != 1 ] && [ $FORCE = 0 ]; then echo "✅ 已是最新"; return; fi
+  [ $CMD = check ] && { echo "⬆️ 有更新/未安装：运行 mixin-update install"; return; }
+  T=$(mktemp -d); download "$URL" "$T/mixin.dmg" "$SIZE" "$SHA"
+  MNT=$(hdiutil attach -nobrowse -readonly "$T/mixin.dmg" | awk -F'\t' '/\/Volumes\//{print $NF}' | tail -1)
+  SRC=$(ls -d "$MNT"/*.app | head -1); [ -n "$SRC" ] || { hdiutil detach "$MNT" -quiet; die "dmg 里没找到 .app"; }
+  DST=${APP:-/Applications/$(basename "$SRC")}; [ -w "$(dirname "$DST")" ] || DST="$HOME/Applications/$(basename "$SRC")"; mkdir -p "$(dirname "$DST")"
+  [ -d "$DST" ] && { rm -rf "$DST.bak-update"; mv "$DST" "$DST.bak-update"; }
+  ditto "$SRC" "$DST"; hdiutil detach "$MNT" -quiet; rm -rf "$T"
+  [ $DELOLD = 1 ] && rm -rf "$DST.bak-update"
+  echo "✅ 已安装到 $DST（字体/主题：应用内 设置→外观 可切深浅色与聊天字号；字体跟随系统）"; }
+
+[ $CMD = recommend ] && { recommend; exit; }
+case "$OS" in Linux) linux;; Darwin) mac;; *) recommend || exit 1;; esac
