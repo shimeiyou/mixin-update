@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Mixin 桌面版更新脚本：查 GitHub 最新 x86_64 AppImage，有新版就下载替换并更新启动项
+# 用法：mixin-update [--check] [--force] [--delete-old] [-h|--help|help]
+set -euo pipefail
+APPDIR="$HOME/Applications"
+DESKTOP="$HOME/.local/share/applications/mixin-desktop.desktop"
+FONTCONF="$HOME/.config/mixin-fonts/fonts.conf"
+ASSET="mixin_desktop_linux_amd64.AppImage"
+API="https://api.github.com/repos/MixinNetwork/flutter-app/releases/latest"
+usage(){ cat <<'HLP'
+mixin-update — Mixin 桌面版（Linux x86_64 AppImage）检查与更新
+
+用法:
+  mixin-update                检查更新；有新版则下载并替换安装
+  mixin-update --check        只检查，不下载
+  mixin-update --delete-old   更新后删除旧版 AppImage（默认保留上一版用于回滚）
+  mixin-update --force        即使已是最新也重新下载安装
+  mixin-update -h | --help | help   显示本帮助
+
+更新时会:
+  1. 从启动项 ~/.local/share/applications/mixin-desktop.desktop 读取当前版本
+  2. 查 GitHub Releases 最新 mixin_desktop_linux_amd64.AppImage
+  3. 下载到 ~/Applications/mixin-<版本>-x86_64.AppImage（先存 .part）
+  4. 校验大小 + sha256，通过才 chmod +x 并改名；失败则原版本不动
+  5. 备份启动项为 mixin-desktop.desktop.bak-update，只替换其中的 AppImage 路径
+
+字体:
+  启动项中的 env FONTCONFIG_FILE=~/.config/mixin-fonts/fonts.conf 原样保留
+  （Mixin 专用 HarmonyOS Sans SC 字体配置）
+
+回滚:
+  mv ~/.local/share/applications/mixin-desktop.desktop.bak-update \
+     ~/.local/share/applications/mixin-desktop.desktop
+  然后重开 Mixin（需未使用 --delete-old，旧 AppImage 仍在）
+
+不需要 sudo。Mixin 运行中时，更新后关掉再从菜单重开即生效。
+HLP
+}
+CHECK=0; FORCE=0; DELOLD=0
+for a in "$@"; do case "$a" in
+  --check) CHECK=1;; --force) FORCE=1;; --delete-old) DELOLD=1;;
+  -h|--help|help) usage; exit 0;; *) echo "未知参数: $a（mixin-update --help 查看用法）" >&2; exit 2;; esac; done
+die(){ echo "❌ $*" >&2; exit 1; }
+for c in curl python3 sha256sum; do command -v $c >/dev/null || die "缺少 $c"; done
+
+# 当前版本：从 .desktop 的 Exec 里取 AppImage 路径
+CUR=$(grep -oP '(?<=\s|=)\S*mixin-[0-9.]+-x86_64\.AppImage' "$DESKTOP" | head -1 || true)
+CURVER=$(basename "${CUR:-mixin-0-x86_64.AppImage}" | sed -E 's/mixin-([0-9.]+)-x86_64\.AppImage/\1/')
+echo "当前版本: ${CURVER} (${CUR:-未找到})"
+
+# 最新版本信息
+INFO=$(curl -fsSL -H 'Accept: application/vnd.github+json' "$API") || die "无法访问 GitHub API（网络/限流），稍后再试"
+read -r TAG URL SIZE DIGEST < <(python3 -c '
+import sys,json;d=json.loads(sys.stdin.read());a=[x for x in d["assets"] if x["name"]==sys.argv[1]]
+if not a: sys.exit("no asset")
+a=a[0];print(d["tag_name"],a["browser_download_url"],a["size"],(a.get("digest") or "none").replace("sha256:",""))' "$ASSET" <<<"$INFO") || die "最新 release 里找不到 $ASSET"
+NEWVER=${TAG#v}
+echo "最新版本: ${NEWVER}"
+
+newer=$(python3 -c 'import sys;v=lambda s:[int(x) for x in s.split(".") if x.isdigit()];print(int(v(sys.argv[1])>v(sys.argv[2])))' "$NEWVER" "$CURVER")
+if [ "$newer" != 1 ] && [ $FORCE = 0 ]; then echo "✅ 已是最新"; exit 0; fi
+[ $CHECK = 1 ] && { echo "⬆️  有更新：$CURVER → $NEWVER（去掉 --check 运行即可安装）"; exit 0; }
+
+DEST="$APPDIR/mixin-${NEWVER}-x86_64.AppImage"; TMP="$DEST.part"
+mkdir -p "$APPDIR"; trap 'rm -f "$TMP"' EXIT
+echo "下载 $URL"
+curl -fL --retry 3 -o "$TMP" "$URL" || die "下载失败，原版本未改动"
+GOT=$(stat -c %s "$TMP"); [ "$GOT" = "$SIZE" ] || die "大小不符 ($GOT != $SIZE)，原版本未改动"
+if [ "$DIGEST" != none ]; then
+  echo "$DIGEST  $TMP" | sha256sum -c --quiet - || die "sha256 校验失败，原版本未改动"; echo "sha256 校验通过"
+else echo "⚠️ 官方未提供 sha256，仅校验了大小"; fi
+chmod +x "$TMP"; mv -f "$TMP" "$DEST"; trap - EXIT
+
+# 更新启动项：只替换 AppImage 路径，保留 FONTCONFIG_FILE 等其余部分
+cp -a "$DESKTOP" "$DESKTOP.bak-update"
+if grep -q 'mixin-[0-9.]*-x86_64\.AppImage' "$DESKTOP"; then
+  sed -i -E "s#\S*mixin-[0-9.]+-x86_64\.AppImage#$DEST#" "$DESKTOP"
+else
+  sed -i -E "s#^Exec=.*#Exec=env FONTCONFIG_FILE=$FONTCONF $DEST %U#" "$DESKTOP"
+fi
+grep -q "FONTCONFIG_FILE=$FONTCONF" "$DESKTOP" || echo "⚠️ 启动项里没有 FONTCONFIG_FILE，请检查 $DESKTOP"
+echo "启动项: $(grep ^Exec= "$DESKTOP")"
+
+if [ -n "${CUR:-}" ] && [ -f "$CUR" ] && [ "$CUR" != "$DEST" ]; then
+  if [ $DELOLD = 1 ]; then rm -f "$CUR"; echo "已删除旧版 $CUR"
+  else
+    # 默认只保留上一版一份作回滚用
+    for f in "$APPDIR"/mixin-*-x86_64.AppImage; do [ "$f" = "$DEST" ] || [ "$f" = "$CUR" ] || rm -f "$f"; done
+    echo "保留旧版用于回滚: $CUR"
+  fi
+fi
+pgrep -f /mixin_desktop >/dev/null && echo "ℹ️ Mixin 正在运行，关掉后从菜单重开即用新版"
+echo "✅ 已更新到 $NEWVER"
+echo "回滚：mv \"$DESKTOP.bak-update\" \"$DESKTOP\"（旧 AppImage 仍在则立即生效）"

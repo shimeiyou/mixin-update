@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Mixin Messenger
+# 把 /home/USER 换成你的家目录（.desktop 里不展开 $HOME）
+Exec=env FONTCONFIG_FILE=/home/USER/.config/mixin-fonts/fonts.conf /home/USER/Applications/mixin-6.3.6-x86_64.AppImage %U
+Icon=/home/USER/.local/share/icons/mixin-desktop.png
+Type=Application
+Categories=Network;InstantMessaging;
+Terminal=false

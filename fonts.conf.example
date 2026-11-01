@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <!-- system config (also pulls in ~/.config/fontconfig/fonts.conf via conf.d/50-user.conf) -->
+  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
+  <match target="pattern">
+    <test qual="any" name="family"><string>sans-serif</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>HarmonyOS Sans SC</string></edit>
+  </match>
+  <alias binding="strong"><family>emoji</family><prefer><family>Noto Color Emoji</family></prefer></alias>
+</fontconfig>
