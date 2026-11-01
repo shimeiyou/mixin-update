@@ -4,7 +4,7 @@
 
 | 平台 | 官方包 | 本工具做法 | 需要管理员 |
 |---|---|---|---|
-| Linux x86_64 / arm64 | AppImage（另有 deb/snap/tar.gz） | AppImage 装到 `~/Applications`，生成菜单启动项和图标 | 否 |
+| Linux x86_64 / arm64 | AppImage（另有 deb/snap/tar.gz） | AppImage **解包**到 `~/Applications/mixin-<版本>/`，启动项运行其中 `AppRun`（免 FUSE 挂载，启动快），生成菜单启动项和图标 | 否 |
 | macOS | `.dmg`（部分版本才附带；也在 Mac App Store） | 取最近一个带 dmg 的版本，装到 `/Applications`（不可写时 `~/Applications`） | 一般否 |
 | Windows x64（ARM64 走仿真） | Inno Setup 安装包 `.exe` | 下载、校验后运行安装向导（可静默） | 一般否 |
 
@@ -46,7 +46,8 @@ mixin-update install [--font 字体名]   安装（已装则等同 update）
 mixin-update update             有新版则下载替换
 mixin-update check              只检查，不下载（旧写法 --check 也可）
 mixin-update help | -h | --help 显示帮助
-  --delete-old   (Linux) 更新后删除旧版 AppImage，默认保留上一版回滚
+  --delete-old   (Linux) 更新后删除上一版，默认保留上一版回滚
+  --keep-appimage (Linux) 解包后保留下载的 AppImage（默认删除）
   --force        即使已是最新也重新安装
 ```
 
@@ -55,13 +56,16 @@ mixin-update help | -h | --help 显示帮助
 ## 字体与显示
 
 - **应用内（三平台通用）**：设置 → 外观：跟随系统 / 浅色 / 深色，聊天字号（-2 ~ +4），消息头像开关。没有字体选项，界面字体跟随系统。
-- **Linux 自定义字体（只对 Mixin 生效）**：`mixin-update install --font "HarmonyOS Sans SC"` 会写 `~/.config/mixin-fonts/fonts.conf`（示例见 `fonts.conf.example`），启动项变为 `Exec=env FONTCONFIG_FILE=~/.config/mixin-fonts/fonts.conf <AppImage> %U`。之后每次 `update` 只替换 AppImage 路径，这段原样保留。字体需先装好（`fc-list | grep 字体名` 能查到）。
+- **Linux 自定义字体（只对 Mixin 生效）**：`mixin-update install --font "HarmonyOS Sans SC"` 会写 `~/.config/mixin-fonts/fonts.conf`（示例见 `fonts.conf.example`），启动项变为 `Exec=env FONTCONFIG_FILE=~/.config/mixin-fonts/fonts.conf ~/Applications/mixin-<版本>/AppRun %U`。之后每次 `update` 只替换程序路径，这段原样保留。字体需先装好（`fc-list | grep 字体名` 能查到）。
 - **macOS / Windows**：跟随系统字体，无单独定制；可用系统的显示缩放/文字大小。
+
+## 为什么默认解包安装（Linux）
+直接运行 AppImage 每次都要用 FUSE 挂载约 112MB 的 squashfs 镜像，启动明显变慢。本工具下载 AppImage 后执行 `--appimage-extract`，解到 `~/Applications/mixin-<版本>/`，启动项和 Hyprland 快捷键（`~/.config/hypr/custom/keybinds.lua` 中已有的 Mixin 绑定）都改为运行 `AppRun`，保留 AppImage 自带的运行环境，只是去掉了挂载开销。下载的 AppImage 解包后默认删除（`--keep-appimage` 保留）。以前用 AppImage 直跑安装的，下次 `mixin-update update` 会自动转换。
 
 ## 回滚
 
-- **Linux**：`mv ~/.local/share/applications/mixin-desktop.desktop.bak-update ~/.local/share/applications/mixin-desktop.desktop`，重开 Mixin（未用 `--delete-old` 时旧 AppImage 仍在）。
-  完全卸载：删 `~/Applications/mixin-*.AppImage`、`~/.local/share/applications/mixin-desktop.desktop`、`~/.local/share/icons/mixin-desktop.png`、`~/.config/mixin-fonts`、`~/.local/bin/mixin-update`。
+- **Linux**：`mv ~/.local/share/applications/mixin-desktop.desktop.bak-update ~/.local/share/applications/mixin-desktop.desktop`，重开 Mixin（未用 `--delete-old` 时上一版目录仍在）。若同步过 Hyprland 快捷键：`mv ~/.config/hypr/custom/keybinds.lua.bak-update ~/.config/hypr/custom/keybinds.lua && hyprctl reload`。
+  完全卸载：删 `~/Applications/mixin-*`（解包目录和 AppImage）、`~/.local/share/applications/mixin-desktop.desktop`、`~/.local/share/icons/mixin-desktop.png`、`~/.config/mixin-fonts`、`~/.local/bin/mixin-update`。
 - **macOS**：更新前旧版被改名为 `Mixin.app.bak-update`；删掉新 `Mixin.app` 再把备份改回原名即可。
 - **Windows**：设置 → 应用 → Mixin 卸载，再从 [Releases](https://github.com/MixinNetwork/flutter-app/releases) 装旧版。
 

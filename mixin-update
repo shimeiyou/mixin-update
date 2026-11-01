@@ -20,19 +20,23 @@ mixin-update — Mixin Messenger 桌面版 安装 / 更新 / 检查（Linux、ma
   mixin-update check              只检查，不下载
   mixin-update help | -h | --help 显示本帮助
 选项:
-  --delete-old   (Linux) 更新后删除旧版 AppImage，默认保留上一版回滚
+  --delete-old   (Linux) 更新后删除上一版，默认保留上一版回滚
+  --keep-appimage (Linux) 解包后保留下载的 AppImage（默认删除）
   --force        即使已是最新也重新安装
   --font NAME    (Linux) 只对 Mixin 生效的字体，例如 "HarmonyOS Sans SC"
   旧写法 --check 等同 check
 
 平台:
-  Linux x86_64/arm64  官方 AppImage → ~/Applications，生成启动项，无需 sudo
+  Linux x86_64/arm64  官方 AppImage 解包到 ~/Applications/mixin-<版本>/，启动项运行 AppRun（免 FUSE、启动快），
+                      若 ~/.config/hypr/custom/keybinds.lua 有 Mixin 绑定则同步路径；无需 sudo；
+                      旧的 AppImage 直跑安装会在下次 update 时自动转换
   macOS               官方 .dmg（若最新版未附 dmg，则取最近带 dmg 的版本并提示 App Store）
   其他                提示不支持并给出官方 Releases 链接
 
 字体（Linux）: 启动项里的 env FONTCONFIG_FILE=~/.config/mixin-fonts/fonts.conf 更新时原样保留
 回滚（Linux）: mv ~/.local/share/applications/mixin-desktop.desktop.bak-update \
                   ~/.local/share/applications/mixin-desktop.desktop
+              mv ~/.config/hypr/custom/keybinds.lua.bak-update ~/.config/hypr/custom/keybinds.lua && hyprctl reload
 回滚（macOS）: 更新前旧 App 备份为 Mixin.app.bak-update，删新版后改回名字即可
 HLP
 }
@@ -40,11 +44,11 @@ die(){ echo "❌ $*" >&2; exit 1; }
 need(){ for c in "$@"; do command -v "$c" >/dev/null || die "缺少命令: $c"; done; }
 vgt(){ python3 -c 'import sys,re;v=lambda s:[int(x) for x in re.findall(r"\d+",s)];print(int(v(sys.argv[1])>v(sys.argv[2])))' "$1" "$2"; }
 
-CMD=update; FORCE=0; DELOLD=0; FONT=""
+CMD=update; FORCE=0; DELOLD=0; KEEPIMG=0; FONT=""
 while [ $# -gt 0 ]; do case "$1" in
   install|update|check|recommend) CMD=$1;;
   help|-h|--help) usage; exit 0;;
-  --check) CMD=check;; --force) FORCE=1;; --delete-old) DELOLD=1;;
+  --check) CMD=check;; --force) FORCE=1;; --delete-old) DELOLD=1;; --keep-appimage) KEEPIMG=1;;
   --font) shift; FONT=${1:-};;
   *) die "未知参数: $1（mixin-update --help 查看用法）";; esac; shift; done
 need curl python3
@@ -75,14 +79,19 @@ recommend(){
   echo "系统: $OS / $ARCH"
   case "$OS" in
     Linux) [ -n "$A" ] || { echo "不支持的架构 $ARCH"; return 1; }
-      echo "推荐: 官方 AppImage（mixin_desktop_linux_${A}.AppImage）装到 ~/Applications，免 sudo，可用本工具自动更新"
+      echo "推荐: 官方 AppImage（mixin_desktop_linux_${A}.AppImage）解包到 ~/Applications/mixin-<版本>/，免 sudo、启动快，可用本工具自动更新"
       echo "其他官方包: .deb（Debian/Ubuntu，需 sudo）、.snap、_portable.tar.gz；Arch 无 AUR 包";;
     Darwin) echo "推荐: 官方 .dmg 装到 /Applications（或 Mac App Store: https://apps.apple.com/app/id1571128582）";;
     *) echo "此脚本不支持 $OS；Windows 请运行 install.ps1，其余见 https://github.com/$REPO/releases"; return 1;;
   esac; }
 
 # ---------- Linux ----------
-lin_current(){ [ -f "$DESKTOP" ] && grep -oE '[^ =]*mixin-[0-9.]+-[a-z0-9_]+\.AppImage' "$DESKTOP" | head -1 || true; }
+# 默认“解包安装”：AppImage 下载后 --appimage-extract 到 ~/Applications/mixin-<版本>/，
+# 启动项/快捷键直接运行其中的 AppRun（免 FUSE 挂载，启动快）。
+KEYBINDS="$HOME/.config/hypr/custom/keybinds.lua"
+PATHRE='[^ ="]*mixin-[0-9.]+(-[a-z0-9_]+\.AppImage|/AppRun)'
+lin_current(){ [ -f "$DESKTOP" ] && grep -oE "$PATHRE" "$DESKTOP" | head -1 || true; }
+lin_curdir(){ case "$1" in */AppRun) dirname "$1";; *) echo "$1";; esac; }
 lin_write_font(){ mkdir -p "$(dirname "$FONTCONF")"; cat > "$FONTCONF" <<X
 <?xml version="1.0"?>
 <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
@@ -99,28 +108,48 @@ X
 linux(){
   [ -n "$A" ] || die "不支持的架构 $ARCH"
   read -r TAG URL SIZE SHA < <(find_asset "mixin_desktop_linux_${A}\.AppImage")
-  NEW=${TAG#v}; CUR=$(lin_current); CURV=$(basename "${CUR:-mixin-0-x.AppImage}" | sed -E 's/mixin-([0-9.]+)-.*/\1/')
+  NEW=${TAG#v}; CUR=$(lin_current); CURV=$(printf '%s' "${CUR:-mixin-0}" | grep -oE 'mixin-[0-9.]+' | head -1 | sed 's/mixin-//; s/\.$//')
   echo "当前: ${CURV} ${CUR:+($CUR)}  最新: $NEW"
   [ -n "$FONT" ] && lin_write_font
-  if [ "$(vgt "$NEW" "$CURV")" != 1 ] && [ $FORCE = 0 ]; then echo "✅ 已是最新"; return; fi
-  [ $CMD = check ] && { echo "⬆️ 有更新/未安装：运行 mixin-update ${CUR:+update}${CUR:-install}"; return; }
+  NEEDCONV=0; case "$CUR" in *.AppImage) NEEDCONV=1;; esac
+  if [ "$(vgt "$NEW" "$CURV")" != 1 ] && [ $FORCE = 0 ] && [ $NEEDCONV = 0 ]; then echo "✅ 已是最新"; return; fi
+  [ $CMD = check ] && { [ $NEEDCONV = 1 ] && echo "ℹ️ 当前为 AppImage 直跑（启动慢），运行 mixin-update update 可转为解包安装"; echo "⬆️ 运行 mixin-update ${CUR:+update}${CUR:-install}"; return; }
   mkdir -p "$APPDIR" "$(dirname "$DESKTOP")" "$(dirname "$ICON")"
-  DEST="$APPDIR/mixin-${NEW}-${LA}.AppImage"; download "$URL" "$DEST" "$SIZE" "$SHA"; chmod +x "$DEST"
-  if [ ! -f "$ICON" ]; then (t=$(mktemp -d); cd "$t" && "$DEST" --appimage-extract mixin_desktop.png >/dev/null 2>&1 && cp squashfs-root/mixin_desktop.png "$ICON"; rm -rf "$t") || true; fi
-  ENVP=""; [ -f "$FONTCONF" ] && ENVP="env FONTCONFIG_FILE=$FONTCONF "
+  DIR="$APPDIR/mixin-${NEW}"; IMG="$APPDIR/mixin-${NEW}-${LA}.AppImage"
+  if [ -x "$DIR/AppRun" ] && [ $FORCE = 0 ]; then echo "已存在解包目录 $DIR"
+  else
+    [ -f "$IMG" ] && [ "$(wc -c <"$IMG" | tr -d ' ')" = "$SIZE" ] && echo "使用已下载的 $IMG" || download "$URL" "$IMG" "$SIZE" "$SHA"
+    chmod +x "$IMG"; T=$(mktemp -d "$APPDIR/.mixin-extract.XXXX")
+    (cd "$T" && "$IMG" --appimage-extract >/dev/null) || { rm -rf "$T"; die "解包失败，原版本未改动"; }
+    [ -x "$T/squashfs-root/AppRun" ] || { rm -rf "$T"; die "解包结果缺少 AppRun，原版本未改动"; }
+    rm -rf "$DIR"; mv "$T/squashfs-root" "$DIR"; rm -rf "$T"; echo "已解包到 $DIR"
+    [ $KEEPIMG = 1 ] && echo "保留 AppImage: $IMG" || { rm -f "$IMG"; echo "已删除下载的 AppImage（--keep-appimage 可保留）"; }
+  fi
+  [ -f "$ICON" ] || cp "$DIR/mixin_desktop.png" "$ICON" 2>/dev/null || true
+  RUN="$DIR/AppRun"; ENVP=""; [ -f "$FONTCONF" ] && ENVP="env FONTCONFIG_FILE=$FONTCONF "
   if [ -f "$DESKTOP" ] && [ -n "$CUR" ]; then
-    cp -a "$DESKTOP" "$DESKTOP.bak-update"; sed -i -E "s#[^ =]*mixin-[0-9.]+-[a-z0-9_]+\.AppImage#$DEST#" "$DESKTOP"
+    cp -a "$DESKTOP" "$DESKTOP.bak-update"; sed -i -E "s#$PATHRE#$RUN#" "$DESKTOP"
     if [ -n "$ENVP" ] && ! grep -q FONTCONFIG_FILE "$DESKTOP"; then sed -i -E "s#^Exec=#Exec=$ENVP#" "$DESKTOP"; fi
   else
     [ -f "$DESKTOP" ] && cp -a "$DESKTOP" "$DESKTOP.bak-update"
-    printf '[Desktop Entry]\nName=Mixin Messenger\nExec=%s%s %%U\nIcon=%s\nType=Application\nCategories=Network;InstantMessaging;\nTerminal=false\nStartupWMClass=Mixin_desktop\n' "$ENVP" "$DEST" "$ICON" > "$DESKTOP"
+    printf '[Desktop Entry]\nName=Mixin Messenger\nExec=%s%s %%U\nIcon=%s\nType=Application\nCategories=Network;InstantMessaging;\nTerminal=false\nStartupWMClass=Mixin_desktop\n' "$ENVP" "$RUN" "$ICON" > "$DESKTOP"
   fi
+  if grep -q '^Path=' "$DESKTOP"; then sed -i "s#^Path=.*#Path=$DIR#" "$DESKTOP"; else sed -i "/^Exec=/a Path=$DIR" "$DESKTOP"; fi
   echo "启动项: $(grep ^Exec= "$DESKTOP")"
-  if [ -n "$CUR" ] && [ -f "$CUR" ] && [ "$CUR" != "$DEST" ]; then
-    if [ $DELOLD = 1 ]; then rm -f "$CUR"; echo "已删除旧版"; else
-      for f in "$APPDIR"/mixin-*.AppImage; do [ "$f" = "$DEST" ] || [ "$f" = "$CUR" ] || rm -f "$f"; done; echo "保留旧版用于回滚: $CUR"; fi
+  # Hyprland（illogical-impulse）自定义快捷键：若已有指向 Mixin 的绑定则同步路径
+  if [ -f "$KEYBINDS" ] && grep -qE "$PATHRE" "$KEYBINDS"; then
+    cp -a "$KEYBINDS" "$KEYBINDS.bak-update"; sed -i -E "s#$PATHRE#$RUN#g" "$KEYBINDS"
+    echo "快捷键已同步: $(grep -nE "$RUN" "$KEYBINDS" | head -1)"; command -v hyprctl >/dev/null && hyprctl reload >/dev/null 2>&1 || true
   fi
-  pgrep -f /mixin_desktop >/dev/null && echo "ℹ️ Mixin 正在运行，关掉后从菜单重开即用新版"
+  # 只保留新版 + 上一版（用于回滚）
+  CD=$(lin_curdir "$CUR")
+  for f in "$APPDIR"/mixin-*; do
+    case "$f" in "$DIR"|"$IMG") continue;; esac
+    if [ "$f" = "$CD" ]; then [ $DELOLD = 1 ] && { rm -rf "$f"; echo "已删除旧版 $f"; }; continue; fi
+    [[ "$f" =~ /mixin-[0-9.]+(-[a-z0-9_]+\.AppImage)?$ ]] && rm -rf "$f"
+  done
+  [ -n "$CD" ] && [ "$CD" != "$DIR" ] && [ -e "$CD" ] && echo "保留上一版用于回滚: $CD"
+  pgrep -f /mixin_desktop >/dev/null && echo "ℹ️ Mixin 正在运行，关掉后重开即用新版"
   echo "✅ 已安装 $NEW（菜单里搜 Mixin Messenger）"; }
 
 # ---------- macOS ----------
