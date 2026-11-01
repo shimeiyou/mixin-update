@@ -25,7 +25,7 @@ curl -fsSL https://raw.githubusercontent.com/shimeiyou/mixin-update/main/install
 **Windows（PowerShell）**
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/shimeiyou/mixin-update/main/install.ps1))) install
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/shimeiyou/mixin-update/main/install.ps1).TrimStart([char]0xFEFF))) install
 ```
 
 或下载 `install.ps1` 后：

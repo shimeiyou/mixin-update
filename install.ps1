@@ -1,6 +1,6 @@
 ﻿# mixin-update for Windows：检测 → 推荐 → 安装/更新 Mixin Messenger 桌面版
 # 用法：
-#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/shimeiyou/mixin-update/main/install.ps1))) install
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/shimeiyou/mixin-update/main/install.ps1).TrimStart([char]0xFEFF))) install
 #   .\install.ps1 [install|update|check|recommend|help] [-Silent] [-Force]
 param([string]$Command = "install", [switch]$Silent, [switch]$Force)
 $ErrorActionPreference = "Stop"
